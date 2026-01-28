@@ -170,14 +170,24 @@ class GIMMVFI_interpolate:
         dtype = gimmvfi_model.dtype
         total_pairs = images.shape[0] - 1
         
+        # Get image dimensions for batch size calculation
+        _, _, H, W = images.shape
+        pixels = H * W
+        
+        # Limit batch size based on resolution to avoid integer overflow
+        # The correlation tensor has shape [batch * H/8 * W/8, 1, H/8, W/8]
+        # Integer overflow occurs when batch * (H/8) * (W/8) > 2^31
+        # Safe limit: batch * pixels/64 < 2^31 -> batch < 2^31 * 64 / pixels
+        max_batch_for_resolution = max(1, int((2**30) / (pixels // 64 + 1)))
+        
         # Adjust batch_size based on available VRAM (auto-scale for safety)
         if torch.cuda.is_available():
             free_vram = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
             free_vram_gb = free_vram / (1024**3)
             # Estimate: ~1GB per frame pair at 1080p
             max_safe_batch = max(1, int(free_vram_gb * 0.6))  # Use 60% of free VRAM
-            batch_size = min(batch_size, max_safe_batch, total_pairs)
-            log.info(f"GIMM-VFI: Using batch_size={batch_size} (free VRAM: {free_vram_gb:.1f}GB)")
+            batch_size = min(batch_size, max_safe_batch, max_batch_for_resolution, total_pairs)
+            log.info(f"GIMM-VFI: Using batch_size={batch_size} (resolution: {W}x{H}, max_for_res: {max_batch_for_resolution}, free VRAM: {free_vram_gb:.1f}GB)")
 
         out_images_list = []
         flows = []
