@@ -280,10 +280,10 @@ class GIMMVFI_interpolate:
         return (image_tensors, flow_tensors)
 
 NODE_CLASS_MAPPINGS = {
-    "DownloadAndLoadGIMMVFIModel_A100": DownloadAndLoadGIMMVFIModel,
-    "GIMMVFI_interpolate_A100": GIMMVFI_interpolate,
+    "DownloadAndLoadGIMMVFIModel": DownloadAndLoadGIMMVFIModel,
+    "GIMMVFI_interpolate": GIMMVFI_interpolate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DownloadAndLoadGIMMVFIModel_A100": "(Down)Load GIMMVFI Model [A100]",
-    "GIMMVFI_interpolate_A100": "GIMM-VFI Interpolate [A100]",
+    "DownloadAndLoadGIMMVFIModel": "(Down)Load GIMMVFI Model",
+    "GIMMVFI_interpolate": "GIMM-VFI Interpolate",
 }
