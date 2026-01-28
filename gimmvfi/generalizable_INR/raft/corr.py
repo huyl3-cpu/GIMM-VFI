@@ -31,8 +31,9 @@ class BidirCorrBlock:
         batch, h1, w1, dim, h2, w2 = corr.shape
         corr_T = corr.clone().permute(0, 4, 5, 3, 1, 2)
 
-        corr = corr.reshape(batch * h1 * w1, dim, h2, w2)
-        corr_T = corr_T.reshape(batch * h2 * w2, dim, h1, w1)
+        # Use -1 to avoid integer overflow with large batch sizes
+        corr = corr.reshape(-1, dim, h2, w2)
+        corr_T = corr_T.reshape(-1, dim, h1, w1)
 
         self.corr_pyramid.append(corr)
         self.corr_pyramid_T.append(corr_T)
@@ -134,7 +135,8 @@ class CorrBlock:
         corr = CorrBlock.corr(fmap1, fmap2)
 
         batch, h1, w1, dim, h2, w2 = corr.shape
-        corr = corr.reshape(batch * h1 * w1, dim, h2, w2)
+        # Use -1 to avoid integer overflow with large batch sizes
+        corr = corr.reshape(-1, dim, h2, w2)
 
         self.corr_pyramid.append(corr)
         for i in range(self.num_levels - 1):
