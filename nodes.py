@@ -146,7 +146,6 @@ class GIMMVFI_interpolate:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
-                "control_after_generate": (["fixed", "increment", "decrement", "randomize"], {"default": "randomize"}),
                 "batch_size": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1, 
                     "tooltip": "Number of frame pairs to process in parallel. Higher = faster on A100. Recommended: 8-16 for A100 80GB, 4-8 for RTX 4090."}),
                 "output_flows": ("BOOLEAN", {"default": False, "tooltip": "Output the flow tensors"}),
@@ -159,7 +158,7 @@ class GIMMVFI_interpolate:
     CATEGORY = "PyramidFlowWrapper"
 
     def interpolate(self, gimmvfi_model, images, ds_factor, interpolation_factor, seed, 
-                    control_after_generate="randomize", batch_size=8, output_flows=False):
+                    batch_size=8, output_flows=False):
         mm.soft_empty_cache()
         images = images.permute(0, 3, 1, 2)
         torch.manual_seed(seed)
