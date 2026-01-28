@@ -69,8 +69,8 @@ class BidirCorrBlock:
             coords_lvl_0 = centroid_lvl_0 + delta_lvl
             coords_lvl_1 = centroid_lvl_1 + delta_lvl
 
-            corr = bilinear_sampler(corr, coords_lvl_0)
-            corr_T = bilinear_sampler(corr_T, coords_lvl_1)
+            corr = bilinear_sampler(corr.contiguous(), coords_lvl_0.contiguous())
+            corr_T = bilinear_sampler(corr_T.contiguous(), coords_lvl_1.contiguous())
             corr = corr.view(batch, h1, w1, -1)
             corr_T = corr_T.view(batch, h1, w1, -1)
             out_pyramid.append(corr)
@@ -159,7 +159,7 @@ class CorrBlock:
             delta_lvl = delta.view(1, 2 * r + 1, 2 * r + 1, 2)
             coords_lvl = centroid_lvl + delta_lvl
 
-            corr = bilinear_sampler(corr, coords_lvl)
+            corr = bilinear_sampler(corr.contiguous(), coords_lvl.contiguous())
             corr = corr.view(batch, h1, w1, -1)
             out_pyramid.append(corr)
 
