@@ -142,10 +142,13 @@ class GIMMVFI_interpolate:
                 "gimmvfi_model": ("GIMMVIF_MODEL",),
                 "images": ("IMAGE", {"tooltip": "The images to interpolate between"}),
                 "ds_factor": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01}),
-                "interpolation_factor": ("INT", {"default": 8, "min": 1, "max": 100, "step": 1}),
+                "interpolation_factor": ("INT", {"default": 2, "min": 1, "max": 100, "step": 1}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             },
             "optional": {
+                "control_after_generate": (["fixed", "increment", "decrement", "randomize"], {"default": "randomize"}),
+                "batch_size": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1, 
+                    "tooltip": "Number of frame pairs to process in parallel. Higher = faster on A100. Recommended: 8-16 for A100 80GB, 4-8 for RTX 4090."}),
                 "output_flows": ("BOOLEAN", {"default": False, "tooltip": "Output the flow tensors"}),
             },
         }
@@ -155,7 +158,8 @@ class GIMMVFI_interpolate:
     FUNCTION = "interpolate"
     CATEGORY = "PyramidFlowWrapper"
 
-    def interpolate(self, gimmvfi_model, images, ds_factor, interpolation_factor,seed, output_flows=False):
+    def interpolate(self, gimmvfi_model, images, ds_factor, interpolation_factor, seed, 
+                    control_after_generate="randomize", batch_size=8, output_flows=False):
         mm.soft_empty_cache()
         images = images.permute(0, 3, 1, 2)
         torch.manual_seed(seed)
@@ -165,36 +169,59 @@ class GIMMVFI_interpolate:
         offload_device = mm.unet_offload_device()
 
         dtype = gimmvfi_model.dtype
+        total_pairs = images.shape[0] - 1
         
+        # Adjust batch_size based on available VRAM (auto-scale for safety)
+        if torch.cuda.is_available():
+            free_vram = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated(0)
+            free_vram_gb = free_vram / (1024**3)
+            # Estimate: ~1GB per frame pair at 1080p
+            max_safe_batch = max(1, int(free_vram_gb * 0.6))  # Use 60% of free VRAM
+            batch_size = min(batch_size, max_safe_batch, total_pairs)
+            log.info(f"GIMM-VFI: Using batch_size={batch_size} (free VRAM: {free_vram_gb:.1f}GB)")
 
         out_images_list = []
         flows = []
-        start = 0
-        end = images.shape[0] - 1
-        pbar = ProgressBar(images.shape[0] - 1)
+        pbar = ProgressBar(total_pairs)
 
         autocast_device = mm.get_autocast_device(device)
         cast_context = torch.autocast(device_type=autocast_device, dtype=dtype) if dtype != torch.float32 else nullcontext()
 
         with cast_context:
-            for j in tqdm(range(start, end)):
-                I0 = images[j].unsqueeze(0)
-                I2 = images[j+1].unsqueeze(0)
-
-                if j == start:
-                    out_images_list.append(I0.squeeze(0).permute(1, 2, 0))            
+            # Process in batches of frame pairs
+            for batch_start in range(0, total_pairs, batch_size):
+                batch_end = min(batch_start + batch_size, total_pairs)
+                current_batch_size = batch_end - batch_start
                 
-                padder = InputPadder(I0.shape, 32)
-                I0, I2 = padder.pad(I0, I2)
-                xs = torch.cat((I0.unsqueeze(2), I2.unsqueeze(2)), dim=2).to(device, non_blocking=True)
+                # Collect frame pairs for this batch
+                I0_batch = []
+                I2_batch = []
+                for j in range(batch_start, batch_end):
+                    I0_batch.append(images[j])
+                    I2_batch.append(images[j + 1])
                 
-                batch_size = xs.shape[0]
+                # Stack into batches
+                I0_stacked = torch.stack(I0_batch, dim=0)  # [B, C, H, W]
+                I2_stacked = torch.stack(I2_batch, dim=0)  # [B, C, H, W]
+                
+                # Add first frame of batch to output (only for first batch)
+                if batch_start == 0:
+                    out_images_list.append(I0_stacked[0].permute(1, 2, 0).cpu())
+                
+                # Padding
+                padder = InputPadder(I0_stacked.shape, 32)
+                I0_padded, I2_padded = padder.pad(I0_stacked, I2_stacked)
+                
+                # Create batched input: [B, C, 2, H, W]
+                xs = torch.cat((I0_padded.unsqueeze(2), I2_padded.unsqueeze(2)), dim=2).to(device, non_blocking=True)
+                
                 s_shape = xs.shape[-2:]
-            
+                
+                # Generate coordinate inputs for all interpolation steps
                 coord_inputs = [
                     (
                         gimmvfi_model.sample_coord_input(
-                            batch_size,
+                            current_batch_size,
                             s_shape,
                             [1 / interpolation_factor * i],
                             device=xs.device,
@@ -205,36 +232,38 @@ class GIMMVFI_interpolate:
                     for i in range(1, interpolation_factor)
                 ]
                 timesteps = [
-                    i * 1 / interpolation_factor * torch.ones(xs.shape[0]).to(xs.device)#.to(torch.float)
+                    i * 1 / interpolation_factor * torch.ones(current_batch_size).to(xs.device)
                     for i in range(1, interpolation_factor)
                 ]
                 
+                # Run batched inference
                 all_outputs = gimmvfi_model(xs, coord_inputs, t=timesteps, ds_factor=ds_factor)
-                out_frames = [padder.unpad(im) for im in all_outputs["imgt_pred"]]
-                out_flowts = [padder.unpad(f) for f in all_outputs["flowt"]]
-
-                if output_flows:
-                    flowt_imgs = [
-                        flow_to_image(
-                            flowt.squeeze().detach().cpu().permute(1, 2, 0).numpy(),
-                            convert_to_bgr=True,
-                        )
-                        for flowt in out_flowts
-                    ]
-                I1_pred_img = [
-                    (I1_pred[0].detach().cpu().permute(1, 2, 0))
-                    for I1_pred in out_frames
-                ]
-
-                for i in range(interpolation_factor - 1):
-                    out_images_list.append(I1_pred_img[i])
-                    if output_flows:
-                        flows.append(flowt_imgs[i])
-
-                out_images_list.append(
-                    ((padder.unpad(I2)).squeeze().detach().cpu().permute(1, 2, 0))
-                )
-                pbar.update(1)
+                
+                # Process outputs for each frame pair in batch
+                for b in range(current_batch_size):
+                    # Extract interpolated frames for this pair
+                    for i, im in enumerate(all_outputs["imgt_pred"]):
+                        unpadded = padder.unpad(im[b:b+1])  # Keep batch dim for unpad
+                        out_images_list.append(unpadded.squeeze(0).detach().cpu().permute(1, 2, 0))
+                        
+                        if output_flows and i < len(all_outputs["flowt"]):
+                            flowt = padder.unpad(all_outputs["flowt"][i][b:b+1])
+                            flowt_img = flow_to_image(
+                                flowt.squeeze().detach().cpu().permute(1, 2, 0).numpy(),
+                                convert_to_bgr=True,
+                            )
+                            flows.append(flowt_img)
+                    
+                    # Add the end frame
+                    I2_unpadded = padder.unpad(I2_padded[b:b+1])
+                    out_images_list.append(I2_unpadded.squeeze(0).detach().cpu().permute(1, 2, 0))
+                    
+                    pbar.update(1)
+                
+                # Clean up batch tensors
+                del xs, I0_padded, I2_padded, I0_stacked, I2_stacked, all_outputs
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         image_tensors = torch.stack(out_images_list)
         image_tensors = image_tensors.cpu().float()
@@ -248,14 +277,13 @@ class GIMMVFI_interpolate:
         else:
             flow_tensors = torch.zeros(1, 64, 64, 3)
 
-
         return (image_tensors, flow_tensors)
 
 NODE_CLASS_MAPPINGS = {
-    "DownloadAndLoadGIMMVFIModel": DownloadAndLoadGIMMVFIModel,
-    "GIMMVFI_interpolate": GIMMVFI_interpolate,
+    "DownloadAndLoadGIMMVFIModel_A100": DownloadAndLoadGIMMVFIModel,
+    "GIMMVFI_interpolate_A100": GIMMVFI_interpolate,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "DownloadAndLoadGIMMVFIModel": "(Down)Load GIMMVFI Model",
-    "GIMMVFI_interpolate": "GIMM-VFI Interpolate",
-    }
+    "DownloadAndLoadGIMMVFIModel_A100": "(Down)Load GIMMVFI Model [A100]",
+    "GIMMVFI_interpolate_A100": "GIMM-VFI Interpolate [A100]",
+}
