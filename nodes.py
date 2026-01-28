@@ -269,10 +269,14 @@ class GIMMVFI_interpolate:
                     
                     pbar.update(1)
                 
-                # Clean up batch tensors
-                del xs, I0_padded, I2_padded, I0_stacked, I2_stacked, all_outputs
+                # Clean up batch tensors to stabilize VRAM
+                del xs, I0_padded, I2_padded, I0_stacked, I2_stacked, all_outputs, coord_inputs, timesteps
                 if torch.cuda.is_available():
+                    torch.cuda.synchronize()  # Wait for all GPU ops to complete
                     torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                import gc
+                gc.collect()
         
         image_tensors = torch.stack(out_images_list)
         image_tensors = image_tensors.cpu().float()
